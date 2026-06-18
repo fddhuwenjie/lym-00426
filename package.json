@@ -1,0 +1,15 @@
+{
+  "name": "member-points-center",
+  "version": "1.0.0",
+  "description": "会员积分与权益中心系统",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "test": "node tests/acceptance.test.js",
+    "init-db": "node scripts/init-db.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.19.2"
+  }
+}
