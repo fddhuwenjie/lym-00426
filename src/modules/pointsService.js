@@ -1,6 +1,6 @@
 const { db, logOperation, generateTransactionNo } = require('../db');
 const { getMemberById } = require('./memberService');
-const { createBatch, deductPointsByFifo } = require('./pointsBatchService');
+const { createBatch, deductPointsByFifo, processMemberExpiredBatches, getTotalAvailablePoints } = require('./pointsBatchService');
 
 const POINTS_SOURCE_DEFAULT = 'general';
 
@@ -81,13 +81,17 @@ const spendPoints = (memberId, amount, reason, operator = 'system', { relatedNo 
     throw new Error('会员不存在');
   }
 
-  const availablePoints = member.points - member.frozen_points;
+  processMemberExpiredBatches(memberId, operator);
+
+  const memberAfter = getMemberById(memberId);
+
+  const availablePoints = getTotalAvailablePoints(memberId) - memberAfter.frozen_points;
   if (availablePoints < amount) {
     throw new Error('积分不足');
   }
 
   const transaction = db.transaction(() => {
-    const newPoints = member.points - amount;
+    const newPoints = memberAfter.points - amount;
     const transactionNo = generateTransactionNo('TXN');
     const now = Date.now();
 
@@ -106,7 +110,7 @@ const spendPoints = (memberId, amount, reason, operator = 'system', { relatedNo 
       transactionNo,
       -amount,
       newPoints,
-      member.frozen_points,
+      memberAfter.frozen_points,
       reason,
       operator,
       now
@@ -148,13 +152,17 @@ const freezePoints = (memberId, amount, reason, operator = 'system', expireAt = 
     throw new Error('会员不存在');
   }
 
-  const availablePoints = member.points - member.frozen_points;
+  processMemberExpiredBatches(memberId, operator);
+
+  const memberAfter = getMemberById(memberId);
+
+  const availablePoints = getTotalAvailablePoints(memberId) - memberAfter.frozen_points;
   if (availablePoints < amount) {
     throw new Error('可用积分不足，无法冻结');
   }
 
   const transaction = db.transaction(() => {
-    const newFrozenPoints = member.frozen_points + amount;
+    const newFrozenPoints = memberAfter.frozen_points + amount;
     const transactionNo = generateTransactionNo('FRZ');
     const now = Date.now();
 
@@ -172,7 +180,7 @@ const freezePoints = (memberId, amount, reason, operator = 'system', expireAt = 
       memberId,
       transactionNo,
       0,
-      member.points,
+      memberAfter.points,
       newFrozenPoints,
       reason,
       operator,

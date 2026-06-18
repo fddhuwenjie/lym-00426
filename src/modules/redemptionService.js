@@ -4,6 +4,7 @@ const { getBenefitById, canRedeemBenefit, checkLevelPermission } = require('./be
 const { spendPoints } = require('./pointsService');
 const { checkRedemptionRisk } = require('./riskControlService');
 const { createCoupon } = require('./couponService');
+const { processMemberExpiredBatches } = require('./pointsBatchService');
 
 const redeemBenefit = (memberId, benefitId, operator = 'system') => {
   const redemptionNo = generateTransactionNo('RED');
@@ -30,6 +31,8 @@ const redeemBenefit = (memberId, benefitId, operator = 'system') => {
   const redemptionId = createPendingRedemption();
 
   try {
+    processMemberExpiredBatches(memberId, operator);
+
     const member = getMemberById(memberId);
     if (!member) {
       throw new Error('会员不存在');

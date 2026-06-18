@@ -1,5 +1,8 @@
 const { db, logOperation, generateTransactionNo } = require('../db');
-const { getMemberById } = require('./memberService');
+
+const getMemberById = (id) => {
+  return db.prepare('SELECT * FROM members WHERE id = ?').get(id);
+};
 
 const generateBatchNo = () => generateTransactionNo('BCH');
 const generateDeductionNo = () => generateTransactionNo('DCT');
@@ -59,17 +62,53 @@ const listBatches = (memberId, { status, source, offset = 0, limit = 100 } = {})
   return db.prepare(sql).all(...params);
 };
 
+const processMemberExpiredBatches = (memberId, operator = 'system') => {
+  const now = Date.now();
+
+  const expiredBatches = db.prepare(`
+    SELECT * FROM points_batches
+    WHERE member_id = ?
+      AND status IN ('active', 'partially_used')
+      AND remaining_amount > 0
+      AND expire_at IS NOT NULL
+      AND expire_at <= ?
+    ORDER BY expire_at ASC
+  `).all(memberId, now);
+
+  const results = [];
+  for (const batch of expiredBatches) {
+    try {
+      const result = expireBatch(batch.id, operator);
+      results.push(result);
+    } catch (e) {
+      // 跳过处理单个失败的批次
+    }
+  }
+
+  return {
+    processed_count: results.length,
+    total_expired_points: results.reduce((sum, r) => sum + r.expired_amount, 0),
+    results
+  };
+};
+
 const getAvailableBatchesForSpend = (memberId) => {
+  processMemberExpiredBatches(memberId);
+
+  const now = Date.now();
   return db.prepare(`
     SELECT * FROM points_batches
     WHERE member_id = ?
       AND status IN ('active', 'partially_used')
       AND remaining_amount > 0
+      AND (expire_at IS NULL OR expire_at > ?)
     ORDER BY expire_at IS NULL, expire_at ASC, created_at ASC
-  `).all(memberId);
+  `).all(memberId, now);
 };
 
 const getTotalAvailablePoints = (memberId) => {
+  processMemberExpiredBatches(memberId);
+
   const result = db.prepare(`
     SELECT COALESCE(SUM(remaining_amount), 0) as total
     FROM points_batches
@@ -359,6 +398,7 @@ module.exports = {
   refundPointsToBatch,
   expireBatch,
   processExpiredBatches,
+  processMemberExpiredBatches,
   getBatchDeductions,
   getMemberBatchDeductions,
   getExpiringBatches

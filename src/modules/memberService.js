@@ -1,4 +1,5 @@
 const { db, logOperation, generateTransactionNo } = require('../db');
+const { processMemberExpiredBatches, getTotalAvailablePoints } = require('./pointsBatchService');
 
 const VALID_LEVELS = ['normal', 'silver', 'gold', 'platinum'];
 const VALID_STATUSES = ['active', 'frozen'];
@@ -116,7 +117,9 @@ const getMemberPointsInfo = (memberId) => {
     throw new Error('会员不存在');
   }
 
-  const availablePoints = member.points - member.frozen_points;
+  processMemberExpiredBatches(memberId);
+
+  const memberAfter = getMemberById(memberId);
 
   const frozenRecords = db.prepare(`
     SELECT * FROM frozen_records 
@@ -124,14 +127,17 @@ const getMemberPointsInfo = (memberId) => {
     ORDER BY created_at DESC
   `).all(memberId);
 
+  const realAvailablePoints = getTotalAvailablePoints(memberId);
+  const availablePoints = realAvailablePoints - memberAfter.frozen_points;
+
   return {
-    member_id: member.id,
-    member_no: member.member_no,
-    name: member.name,
-    level: member.level,
-    status: member.status,
-    total_points: member.points,
-    frozen_points: member.frozen_points,
+    member_id: memberAfter.id,
+    member_no: memberAfter.member_no,
+    name: memberAfter.name,
+    level: memberAfter.level,
+    status: memberAfter.status,
+    total_points: memberAfter.points,
+    frozen_points: memberAfter.frozen_points,
     available_points: availablePoints >= 0 ? availablePoints : 0,
     frozen_records: frozenRecords
   };

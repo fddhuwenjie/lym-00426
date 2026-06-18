@@ -182,24 +182,44 @@ test('创建短期有效的积分批次', () => {
 });
 
 test('处理过期积分批次', () => {
-  const beforeInfo = memberService.getMemberPointsInfo(global.member1Id);
-  const beforeTotal = beforeInfo.total_points;
+  const testMember = memberService.registerMember('TST_EXPIRE_001', '过期测试会员', 'normal', 'admin');
 
-  const result = pointsBatchService.processExpiredBatches('admin');
-  assert.ok(result.processed_count >= 1);
-  assert.ok(result.total_expired_points >= 200);
+  const expireAtPast = Date.now() - 1000;
+  pointsService.earnPoints(testMember.id, 250, '已过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtPast
+  });
 
-  const afterInfo = memberService.getMemberPointsInfo(global.member1Id);
-  assert.strictEqual(afterInfo.total_points, beforeTotal - 200);
+  const expireAtFuture = Date.now() + 1000 * 60 * 60;
+  pointsService.earnPoints(testMember.id, 500, '未过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtFuture
+  });
+
+  const beforeMember = db.prepare('SELECT * FROM members WHERE id = ?').get(testMember.id);
+  const beforeTotal = beforeMember.points;
+  assert.strictEqual(beforeTotal, 750);
+
+  const result = pointsBatchService.processMemberExpiredBatches(testMember.id, 'admin');
+  assert.strictEqual(result.processed_count, 1);
+  assert.strictEqual(result.total_expired_points, 250);
+
+  const afterMember = db.prepare('SELECT * FROM members WHERE id = ?').get(testMember.id);
+  assert.strictEqual(afterMember.points, beforeTotal - 250);
+  assert.strictEqual(afterMember.points, 500);
 });
 
 test('过期积分生成过期流水', () => {
+  memberService.getMemberPointsInfo(global.member1Id);
+
   const transactions = pointsService.getTransactionHistory(global.member1Id, { type: 'expire' });
   assert.ok(transactions.length >= 1);
   assert.ok(transactions[0].amount < 0);
 });
 
 test('已过期的批次状态为expired', () => {
+  pointsBatchService.processMemberExpiredBatches(global.member1Id, 'admin');
+
   const batch = pointsBatchService.getBatchByNo(global.expiredBatchNo);
   assert.strictEqual(batch.status, 'expired');
   assert.strictEqual(batch.remaining_amount, 0);
@@ -644,6 +664,215 @@ test('券码操作有日志记录', () => {
   assert.ok(types.includes('coupon_create'));
   assert.ok(types.includes('coupon_redeem'));
   assert.ok(types.includes('coupon_void'));
+});
+
+console.log('\n14. 实时过期处理验证测试');
+test('积分到期未批处理时，查询可用积分自动排除过期批次', () => {
+  const testMember = memberService.registerMember('TST_RT_001', '实时过期测试会员1', 'normal', 'admin');
+
+  const expireAtPast = Date.now() - 500;
+  pointsService.earnPoints(testMember.id, 300, '已过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtPast
+  });
+
+  const expireAtFuture = Date.now() + 1000 * 60 * 60;
+  pointsService.earnPoints(testMember.id, 500, '未过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtFuture
+  });
+
+  const memberDbBefore = db.prepare('SELECT * FROM members WHERE id = ?').get(testMember.id);
+  assert.strictEqual(memberDbBefore.points, 800);
+
+  const info = memberService.getMemberPointsInfo(testMember.id);
+  assert.strictEqual(info.available_points, 500);
+  assert.strictEqual(info.total_points, 500);
+
+  const memberDbAfter = db.prepare('SELECT * FROM members WHERE id = ?').get(testMember.id);
+  assert.strictEqual(memberDbAfter.points, 500);
+
+  const transactions = pointsService.getTransactionHistory(testMember.id, { type: 'expire' });
+  assert.ok(transactions.length >= 1);
+  assert.strictEqual(transactions[0].amount, -300);
+});
+
+test('积分到期未批处理时，直接扣减会先处理过期再扣减未过期批次', () => {
+  const testMember = memberService.registerMember('TST_RT_002', '实时过期测试会员2', 'normal', 'admin');
+
+  const expireAtPast = Date.now() - 500;
+  pointsService.earnPoints(testMember.id, 200, '已过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtPast
+  });
+
+  const expireAtNear = Date.now() + 1000 * 60;
+  pointsService.earnPoints(testMember.id, 300, '快到期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtNear
+  });
+
+  const expireAtFar = Date.now() + 1000 * 60 * 60 * 24;
+  pointsService.earnPoints(testMember.id, 500, '远到期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtFar
+  });
+
+  const memberDbBefore = db.prepare('SELECT * FROM members WHERE id = ?').get(testMember.id);
+  assert.strictEqual(memberDbBefore.points, 1000);
+
+  pointsService.spendPoints(testMember.id, 400, '测试扣减', 'admin');
+
+  const memberDbAfter = db.prepare('SELECT * FROM members WHERE id = ?').get(testMember.id);
+  assert.strictEqual(memberDbAfter.points, 400);
+
+  const batches = pointsBatchService.listBatches(testMember.id);
+  const nearBatch = batches.find(b => b.reason === '快到期积分');
+  const farBatch = batches.find(b => b.reason === '远到期积分');
+
+  assert.strictEqual(nearBatch.remaining_amount, 0);
+  assert.strictEqual(nearBatch.status, 'used_up');
+  assert.strictEqual(farBatch.remaining_amount, 400);
+  assert.strictEqual(farBatch.status, 'partially_used');
+});
+
+test('积分到期未批处理时，积分不足兑换会被拒绝（先扣过期后判断）', () => {
+  const testMember = memberService.registerMember('TST_RT_003', '实时过期测试会员3', 'normal', 'admin');
+
+  const expireAtPast = Date.now() - 500;
+  pointsService.earnPoints(testMember.id, 500, '已过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtPast
+  });
+
+  pointsService.earnPoints(testMember.id, 100, '未过期积分', 'admin', {
+    source: 'test',
+    expireAt: Date.now() + 1000 * 60 * 60
+  });
+
+  const testBenefit = benefitService.createBenefit('RT_TEST_BENEFIT', '实时过期测试权益', 300, 10, {
+    minLevel: 'normal',
+    operator: 'admin'
+  });
+
+  const result = redemptionService.redeemBenefit(testMember.id, testBenefit.id, 'admin');
+  assert.strictEqual(result.success, false);
+  assert.ok(result.reason.includes('积分不足') || result.reason.includes('积分'));
+
+  const memberDbAfter = db.prepare('SELECT * FROM members WHERE id = ?').get(testMember.id);
+  assert.strictEqual(memberDbAfter.points, 100);
+
+  const info = memberService.getMemberPointsInfo(testMember.id);
+  assert.strictEqual(info.available_points, 100);
+});
+
+test('积分到期未批处理时，兑换会先生成过期流水再使用未过期批次', () => {
+  const testMember = memberService.registerMember('TST_RT_004', '实时过期测试会员4', 'normal', 'admin');
+
+  const expireAtPast = Date.now() - 500;
+  pointsService.earnPoints(testMember.id, 200, '已过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtPast
+  });
+
+  const expireAtNear = Date.now() + 1000 * 60;
+  pointsService.earnPoints(testMember.id, 300, '快到期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtNear
+  });
+
+  const expireAtFar = Date.now() + 1000 * 60 * 60 * 24;
+  pointsService.earnPoints(testMember.id, 500, '远到期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtFar
+  });
+
+  const testBenefit = benefitService.createBenefit('RT_TEST_BENEFIT2', '实时过期测试权益2', 600, 10, {
+    minLevel: 'normal',
+    operator: 'admin'
+  });
+
+  const result = redemptionService.redeemBenefit(testMember.id, testBenefit.id, 'admin');
+  assert.strictEqual(result.success, true);
+  assert.ok(result.coupon_code);
+
+  const memberDbAfter = db.prepare('SELECT * FROM members WHERE id = ?').get(testMember.id);
+  assert.strictEqual(memberDbAfter.points, 200);
+
+  const expireTransactions = pointsService.getTransactionHistory(testMember.id, { type: 'expire' });
+  assert.ok(expireTransactions.length >= 1);
+  const totalExpired = expireTransactions.reduce((s, t) => s + Math.abs(t.amount), 0);
+  assert.strictEqual(totalExpired, 200);
+
+  const batches = pointsBatchService.listBatches(testMember.id);
+  const nearBatch = batches.find(b => b.reason === '快到期积分');
+  const farBatch = batches.find(b => b.reason === '远到期积分');
+  const pastBatch = batches.find(b => b.reason === '已过期积分');
+
+  assert.strictEqual(pastBatch.status, 'expired');
+  assert.strictEqual(nearBatch.remaining_amount, 0);
+  assert.strictEqual(nearBatch.status, 'used_up');
+  assert.strictEqual(farBatch.remaining_amount, 200);
+  assert.strictEqual(farBatch.status, 'partially_used');
+});
+
+test('积分到期未批处理时，冻结积分使用真实可用积分判断', () => {
+  const testMember = memberService.registerMember('TST_RT_005', '实时过期测试会员5', 'normal', 'admin');
+
+  const expireAtPast = Date.now() - 500;
+  pointsService.earnPoints(testMember.id, 500, '已过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtPast
+  });
+
+  pointsService.earnPoints(testMember.id, 200, '未过期积分', 'admin', {
+    source: 'test',
+    expireAt: Date.now() + 1000 * 60 * 60
+  });
+
+  assert.throws(() => {
+    pointsService.freezePoints(testMember.id, 300, '测试冻结', 'admin');
+  }, /可用积分不足/);
+
+  const result = pointsService.freezePoints(testMember.id, 150, '测试冻结', 'admin');
+  assert.ok(result.transaction_no);
+
+  const memberDbAfter = db.prepare('SELECT * FROM members WHERE id = ?').get(testMember.id);
+  assert.strictEqual(memberDbAfter.points, 200);
+  assert.strictEqual(memberDbAfter.frozen_points, 150);
+});
+
+test('扣减批次查询不包含已到期批次', () => {
+  const testMember = memberService.registerMember('TST_RT_006', '实时过期测试会员6', 'normal', 'admin');
+
+  const expireAtPast = Date.now() - 500;
+  pointsService.earnPoints(testMember.id, 300, '已过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtPast
+  });
+
+  const expireAtFuture = Date.now() + 1000 * 60 * 60;
+  pointsService.earnPoints(testMember.id, 500, '未过期积分', 'admin', {
+    source: 'test',
+    expireAt: expireAtFuture
+  });
+
+  const batchesBefore = db.prepare(`
+    SELECT * FROM points_batches
+    WHERE member_id = ? AND status IN ('active', 'partially_used')
+  `).all(testMember.id);
+  assert.strictEqual(batchesBefore.length, 2);
+
+  const availableBatches = pointsBatchService.getAvailableBatchesForSpend(testMember.id);
+  assert.strictEqual(availableBatches.length, 1);
+  assert.strictEqual(availableBatches[0].remaining_amount, 500);
+  assert.strictEqual(availableBatches[0].reason, '未过期积分');
+
+  const expiredBatch = db.prepare(`
+    SELECT * FROM points_batches WHERE member_id = ? AND reason = '已过期积分'
+  `).get(testMember.id);
+  assert.strictEqual(expiredBatch.status, 'expired');
+  assert.strictEqual(expiredBatch.remaining_amount, 0);
 });
 
 console.log('\n========================================');
