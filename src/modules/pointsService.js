@@ -1,7 +1,10 @@
 const { db, logOperation, generateTransactionNo } = require('../db');
 const { getMemberById } = require('./memberService');
+const { createBatch, deductPointsByFifo } = require('./pointsBatchService');
 
-const earnPoints = (memberId, amount, reason, operator = 'system') => {
+const POINTS_SOURCE_DEFAULT = 'general';
+
+const earnPoints = (memberId, amount, reason, operator = 'system', { source = POINTS_SOURCE_DEFAULT, expireAt = null } = {}) => {
   if (amount <= 0) {
     throw new Error('积分数量必须大于0');
   }
@@ -40,8 +43,13 @@ const earnPoints = (memberId, amount, reason, operator = 'system') => {
       now
     );
 
+    const batch = createBatch(memberId, amount, source, reason, {
+      expireAt,
+      transactionNo
+    });
+
     logOperation('points_earn', operator, memberId, null, 
-      `获取积分 ${amount}，原因: ${reason}，交易号: ${transactionNo}`);
+      `获取积分 ${amount}，原因: ${reason}，交易号: ${transactionNo}，批次号: ${batch.batch_no}`);
 
     return {
       transaction_no: transactionNo,
@@ -50,6 +58,9 @@ const earnPoints = (memberId, amount, reason, operator = 'system') => {
       balance_after: newPoints,
       type: 'earn',
       reason,
+      source,
+      expire_at: expireAt,
+      batch_no: batch.batch_no,
       created_at: now
     };
   });
@@ -57,7 +68,7 @@ const earnPoints = (memberId, amount, reason, operator = 'system') => {
   return transaction();
 };
 
-const spendPoints = (memberId, amount, reason, operator = 'system') => {
+const spendPoints = (memberId, amount, reason, operator = 'system', { relatedNo = null } = {}) => {
   if (amount <= 0) {
     throw new Error('积分数量必须大于0');
   }
@@ -101,8 +112,13 @@ const spendPoints = (memberId, amount, reason, operator = 'system') => {
       now
     );
 
+    const fifoResult = deductPointsByFifo(memberId, amount, 'spend', reason, {
+      relatedNo,
+      operator
+    });
+
     logOperation('points_spend', operator, memberId, null, 
-      `扣减积分 ${amount}，原因: ${reason}，交易号: ${transactionNo}`);
+      `扣减积分 ${amount}，原因: ${reason}，交易号: ${transactionNo}，FIFO扣减批次: ${fifoResult.deductions.length}个`);
 
     return {
       transaction_no: transactionNo,
@@ -111,6 +127,7 @@ const spendPoints = (memberId, amount, reason, operator = 'system') => {
       balance_after: newPoints,
       type: 'spend',
       reason,
+      batch_deductions: fifoResult.deductions,
       created_at: now
     };
   });
@@ -317,11 +334,128 @@ const getExpiringFrozenRecords = (hours = 24) => {
   `).all(expireThreshold, now);
 };
 
+const expirePoints = (memberId, amount, reason, operator = 'system') => {
+  if (amount <= 0) {
+    throw new Error('过期积分数量必须大于0');
+  }
+  if (!reason || reason.trim() === '') {
+    throw new Error('必须提供过期原因');
+  }
+
+  const member = getMemberById(memberId);
+  if (!member) {
+    throw new Error('会员不存在');
+  }
+  if (member.points < amount) {
+    throw new Error('会员总积分不足，无法过期');
+  }
+
+  const transaction = db.transaction(() => {
+    const newPoints = member.points - amount;
+    const transactionNo = generateTransactionNo('TXN');
+    const now = Date.now();
+
+    const updateMemberStmt = db.prepare(`
+      UPDATE members SET points = ?, updated_at = ? WHERE id = ?
+    `);
+    updateMemberStmt.run(newPoints, now, memberId);
+
+    const insertTransactionStmt = db.prepare(`
+      INSERT INTO points_transactions 
+      (member_id, transaction_no, type, amount, balance_after, frozen_after, reason, operator, created_at)
+      VALUES (?, ?, 'expire', ?, ?, ?, ?, ?, ?)
+    `);
+    insertTransactionStmt.run(
+      memberId,
+      transactionNo,
+      -amount,
+      newPoints,
+      member.frozen_points,
+      reason,
+      operator,
+      now
+    );
+
+    logOperation('points_expire', operator, memberId, null,
+      `过期积分 ${amount}，原因: ${reason}，交易号: ${transactionNo}`);
+
+    return {
+      transaction_no: transactionNo,
+      member_id: memberId,
+      amount,
+      balance_after: newPoints,
+      type: 'expire',
+      reason,
+      created_at: now
+    };
+  });
+
+  return transaction();
+};
+
+const refundPoints = (memberId, amount, reason, operator = 'system') => {
+  if (amount <= 0) {
+    throw new Error('退回积分数量必须大于0');
+  }
+  if (!reason || reason.trim() === '') {
+    throw new Error('必须提供退回原因');
+  }
+
+  const member = getMemberById(memberId);
+  if (!member) {
+    throw new Error('会员不存在');
+  }
+
+  const transaction = db.transaction(() => {
+    const newPoints = member.points + amount;
+    const transactionNo = generateTransactionNo('TXN');
+    const now = Date.now();
+
+    const updateMemberStmt = db.prepare(`
+      UPDATE members SET points = ?, updated_at = ? WHERE id = ?
+    `);
+    updateMemberStmt.run(newPoints, now, memberId);
+
+    const insertTransactionStmt = db.prepare(`
+      INSERT INTO points_transactions 
+      (member_id, transaction_no, type, amount, balance_after, frozen_after, reason, operator, created_at)
+      VALUES (?, ?, 'refund', ?, ?, ?, ?, ?, ?)
+    `);
+    insertTransactionStmt.run(
+      memberId,
+      transactionNo,
+      amount,
+      newPoints,
+      member.frozen_points,
+      reason,
+      operator,
+      now
+    );
+
+    logOperation('points_refund', operator, memberId, null,
+      `退回积分 ${amount}，原因: ${reason}，交易号: ${transactionNo}`);
+
+    return {
+      transaction_no: transactionNo,
+      member_id: memberId,
+      amount,
+      balance_after: newPoints,
+      type: 'refund',
+      reason,
+      created_at: now
+    };
+  });
+
+  return transaction();
+};
+
 module.exports = {
   earnPoints,
   spendPoints,
   freezePoints,
   unfreezePoints,
+  expirePoints,
+  refundPoints,
   getTransactionHistory,
   getFrozenRecords,
   getExpiringFrozenRecords

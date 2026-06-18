@@ -2,6 +2,8 @@ const { db, logOperation, generateTransactionNo } = require('../db');
 const { getMemberById, getMemberPointsInfo } = require('./memberService');
 const { getBenefitById, canRedeemBenefit, checkLevelPermission } = require('./benefitService');
 const { spendPoints } = require('./pointsService');
+const { checkRedemptionRisk } = require('./riskControlService');
+const { createCoupon } = require('./couponService');
 
 const redeemBenefit = (memberId, benefitId, operator = 'system') => {
   const redemptionNo = generateTransactionNo('RED');
@@ -31,6 +33,20 @@ const redeemBenefit = (memberId, benefitId, operator = 'system') => {
     const member = getMemberById(memberId);
     if (!member) {
       throw new Error('会员不存在');
+    }
+
+    const riskCheck = checkRedemptionRisk(memberId, benefitId, operator);
+    if (!riskCheck.pass) {
+      updateRedemptionStatus(redemptionId, 'failed', 0, riskCheck.reason);
+      logOperation('redemption_failed_risk', operator, memberId, benefitId, 
+        `兑换失败: 风控拦截 - ${riskCheck.reason}，兑换单号: ${redemptionNo}`);
+      return {
+        success: false,
+        redemption_no: redemptionNo,
+        reason: riskCheck.reason,
+        details: riskCheck.details,
+        risk_record_no: riskCheck.record ? riskCheck.record.record_no : null
+      };
     }
 
     if (member.status === 'frozen') {
@@ -97,17 +113,23 @@ const redeemBenefit = (memberId, benefitId, operator = 'system') => {
       updateBenefitStmt.run(newAvailableStock, newStatus, Date.now(), benefitId);
 
       const spendResult = spendPoints(memberId, benefit.points_cost, 
-        `兑换权益: ${benefit.name}`, operator);
+        `兑换权益: ${benefit.name}`, operator, { relatedNo: redemptionNo });
 
       updateRedemptionStatus(redemptionId, 'success', benefit.points_cost, null);
 
-      return { spendResult, newAvailableStock };
+      const couponExpireAt = benefit.expire_at || null;
+      const coupon = createCoupon(redemptionId, memberId, benefitId, benefit.points_cost, {
+        expireAt: couponExpireAt,
+        operator
+      });
+
+      return { spendResult, newAvailableStock, coupon };
     });
 
     const result = transaction();
 
     logOperation('redemption_success', operator, memberId, benefitId, 
-      `兑换成功: ${benefit.name}，消耗积分 ${benefit.points_cost}，兑换单号: ${redemptionNo}`);
+      `兑换成功: ${benefit.name}，消耗积分 ${benefit.points_cost}，兑换单号: ${redemptionNo}，券码: ${result.coupon.coupon_code}`);
 
     return {
       success: true,
@@ -119,6 +141,8 @@ const redeemBenefit = (memberId, benefitId, operator = 'system') => {
       points_cost: benefit.points_cost,
       balance_after: result.spendResult.balance_after,
       remaining_stock: result.newAvailableStock,
+      coupon_code: result.coupon.coupon_code,
+      coupon_expire_at: result.coupon.expire_at,
       created_at: now
     };
 

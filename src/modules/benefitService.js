@@ -172,9 +172,6 @@ const canRedeemBenefit = (benefitId) => {
   if (benefit.available_stock <= 0) {
     return { canRedeem: false, reason: '权益库存不足' };
   }
-  if (benefit.expire_at && benefit.expire_at < Date.now()) {
-    return { canRedeem: false, reason: '权益已过期' };
-  }
   return { canRedeem: true, reason: null, benefit };
 };
 

@@ -6,6 +6,10 @@ const pointsService = require('./modules/pointsService');
 const benefitService = require('./modules/benefitService');
 const redemptionService = require('./modules/redemptionService');
 const logService = require('./modules/logService');
+const pointsBatchService = require('./modules/pointsBatchService');
+const riskControlService = require('./modules/riskControlService');
+const couponService = require('./modules/couponService');
+const settlementService = require('./modules/settlementService');
 
 const handleAsync = (fn) => (req, res, next) => {
   try {
@@ -215,6 +219,214 @@ router.get('/logs/stats', handleAsync((req, res) => {
   return logService.getLogStats({
     operationType: operation_type,
     memberLevel: member_level,
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null
+  });
+}));
+
+router.get('/points-batches/member/:memberId', handleAsync((req, res) => {
+  const { status, source, offset, limit } = req.query;
+  return pointsBatchService.listBatches(parseInt(req.params.memberId), {
+    status,
+    source,
+    offset: offset ? parseInt(offset) : 0,
+    limit: limit ? parseInt(limit) : 100
+  });
+}));
+
+router.get('/points-batches/:id', handleAsync((req, res) => {
+  return pointsBatchService.getBatchById(parseInt(req.params.id));
+}));
+
+router.get('/points-batches/no/:batchNo', handleAsync((req, res) => {
+  return pointsBatchService.getBatchByNo(req.params.batchNo);
+}));
+
+router.get('/points-batches/:id/deductions', handleAsync((req, res) => {
+  const { offset, limit } = req.query;
+  return pointsBatchService.getBatchDeductions(parseInt(req.params.id), {
+    offset: offset ? parseInt(offset) : 0,
+    limit: limit ? parseInt(limit) : 100
+  });
+}));
+
+router.get('/points-batches/member/:memberId/expiring', handleAsync((req, res) => {
+  const { hours } = req.query;
+  return pointsBatchService.getExpiringBatches(parseInt(req.params.memberId), hours ? parseInt(hours) : 24);
+}));
+
+router.post('/points-batches/process-expired', handleAsync((req, res) => {
+  const { operator } = req.body;
+  return pointsBatchService.processExpiredBatches(operator || 'system');
+}));
+
+router.post('/risk-control/rules', handleAsync((req, res) => {
+  const { rule_code, rule_name, rule_type, min_level, max_daily_redemptions, 
+          max_daily_points, same_benefit_interval_hours, description, operator } = req.body;
+  return riskControlService.createRule(rule_code, rule_name, rule_type, {
+    minLevel: min_level,
+    maxDailyRedemptions: max_daily_redemptions ? parseInt(max_daily_redemptions) : null,
+    maxDailyPoints: max_daily_points ? parseInt(max_daily_points) : null,
+    sameBenefitIntervalHours: same_benefit_interval_hours ? parseInt(same_benefit_interval_hours) : null,
+    description,
+    operator
+  });
+}));
+
+router.get('/risk-control/rules', handleAsync((req, res) => {
+  const { status, rule_type, offset, limit } = req.query;
+  return riskControlService.listRules({
+    status,
+    ruleType: rule_type,
+    offset: offset ? parseInt(offset) : 0,
+    limit: limit ? parseInt(limit) : 100
+  });
+}));
+
+router.get('/risk-control/rules/:id', handleAsync((req, res) => {
+  return riskControlService.getRuleById(parseInt(req.params.id));
+}));
+
+router.put('/risk-control/rules/:id/status', handleAsync((req, res) => {
+  const { status, operator } = req.body;
+  return riskControlService.updateRuleStatus(parseInt(req.params.id), status, operator);
+}));
+
+router.get('/risk-control/records', handleAsync((req, res) => {
+  const { member_id, benefit_id, rule_type, status, start_time, end_time, offset, limit } = req.query;
+  return riskControlService.listRiskRecords({
+    memberId: member_id ? parseInt(member_id) : null,
+    benefitId: benefit_id ? parseInt(benefit_id) : null,
+    ruleType: rule_type,
+    status,
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null,
+    offset: offset ? parseInt(offset) : 0,
+    limit: limit ? parseInt(limit) : 100
+  });
+}));
+
+router.get('/risk-control/records/:id', handleAsync((req, res) => {
+  return riskControlService.getRiskRecordById(parseInt(req.params.id));
+}));
+
+router.get('/risk-control/records/no/:recordNo', handleAsync((req, res) => {
+  return riskControlService.getRiskRecordByNo(req.params.recordNo);
+}));
+
+router.put('/risk-control/records/:id/status', handleAsync((req, res) => {
+  const { status, operator } = req.body;
+  return riskControlService.updateRiskRecordStatus(parseInt(req.params.id), status, operator);
+}));
+
+router.get('/coupons', handleAsync((req, res) => {
+  const { member_id, benefit_id, status, redemption_id, start_time, end_time, offset, limit } = req.query;
+  return couponService.listCoupons({
+    memberId: member_id ? parseInt(member_id) : null,
+    benefitId: benefit_id ? parseInt(benefit_id) : null,
+    status,
+    redemptionId: redemption_id ? parseInt(redemption_id) : null,
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null,
+    offset: offset ? parseInt(offset) : 0,
+    limit: limit ? parseInt(limit) : 100
+  });
+}));
+
+router.get('/coupons/:id', handleAsync((req, res) => {
+  return couponService.getCouponById(parseInt(req.params.id));
+}));
+
+router.get('/coupons/code/:couponCode', handleAsync((req, res) => {
+  return couponService.getCouponByCode(req.params.couponCode);
+}));
+
+router.post('/coupons/redeem', handleAsync((req, res) => {
+  const { coupon_code, operator } = req.body;
+  return couponService.redeemCoupon(coupon_code, operator || 'system');
+}));
+
+router.post('/coupons/void', handleAsync((req, res) => {
+  const { coupon_code, reason, operator } = req.body;
+  return couponService.voidCoupon(coupon_code, reason, operator || 'system');
+}));
+
+router.post('/coupons/process-expired', handleAsync((req, res) => {
+  const { operator } = req.body;
+  return couponService.processExpiredCoupons(operator || 'system');
+}));
+
+router.get('/coupons/stats/summary', handleAsync((req, res) => {
+  const { member_id, benefit_id, start_time, end_time, member_level } = req.query;
+  return couponService.getCouponStats({
+    memberId: member_id ? parseInt(member_id) : null,
+    benefitId: benefit_id ? parseInt(benefit_id) : null,
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null,
+    memberLevel: member_level
+  });
+}));
+
+router.get('/settlement/summary', handleAsync((req, res) => {
+  const { start_time, end_time, member_level, benefit_type, benefit_id } = req.query;
+  return settlementService.getSettlementStats({
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null,
+    memberLevel: member_level,
+    benefitType: benefit_type,
+    benefitId: benefit_id ? parseInt(benefit_id) : null
+  });
+}));
+
+router.get('/settlement/by-member-level', handleAsync((req, res) => {
+  const { start_time, end_time } = req.query;
+  return settlementService.getSettlementByMemberLevel({
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null
+  });
+}));
+
+router.get('/settlement/by-benefit', handleAsync((req, res) => {
+  const { start_time, end_time, member_level } = req.query;
+  return settlementService.getSettlementByBenefit({
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null,
+    memberLevel: member_level
+  });
+}));
+
+router.get('/settlement/by-date', handleAsync((req, res) => {
+  const { start_time, end_time, member_level, benefit_id } = req.query;
+  return settlementService.getSettlementByDate({
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null,
+    memberLevel: member_level,
+    benefitId: benefit_id ? parseInt(benefit_id) : null
+  });
+}));
+
+router.get('/settlement/points', handleAsync((req, res) => {
+  const { start_time, end_time, member_level } = req.query;
+  return settlementService.getPointsSettlementStats({
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null,
+    memberLevel: member_level
+  });
+}));
+
+router.get('/settlement/risk-control', handleAsync((req, res) => {
+  const { start_time, end_time, member_level, rule_type } = req.query;
+  return settlementService.getRiskControlSettlement({
+    startTime: start_time ? parseInt(start_time) : null,
+    endTime: end_time ? parseInt(end_time) : null,
+    memberLevel: member_level,
+    ruleType: rule_type
+  });
+}));
+
+router.get('/settlement/full', handleAsync((req, res) => {
+  const { start_time, end_time } = req.query;
+  return settlementService.getFullSettlementReport({
     startTime: start_time ? parseInt(start_time) : null,
     endTime: end_time ? parseInt(end_time) : null
   });
